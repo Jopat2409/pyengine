@@ -3,14 +3,17 @@ The main engine instance used to run programs using pyengine :)
 """
 import ctypes
 import math
+import os.path
 import sys
 import time
 import pygame
-from typing import Optional
+from pygame import gfxdraw as gx
+from typing import Optional, Union
 
-import EngineLog
 import Scene
+import EngineLog
 from Constants import *
+from RenderObject import RenderObject
 
 """ ------------- ENGINE PRIVATE VARIABLES ----------- """
 _m_e_IsInit: bool = False
@@ -240,7 +243,7 @@ _m_rWindow: Optional[pygame.Surface] = None
 _m_rQueue: list = []
 _m_rPrevRect: Optional[pygame.Rect] = None
 
-_m_rTexrtureBank: dict = {}
+_m_rTextureBank: dict = {}
 _m_rTextureCache: dict = {}
 _m_rToCleanup: list = []
 
@@ -295,21 +298,50 @@ def get_vsync() -> bool:
    return _get_render_flag(RF_VSYNC)
 
 
+_m_rLastRefresh: Optional[Union[tuple, str]] = None
+
 _m_eEngineLogger: Optional[EngineLog.Logger] = None
 _m_eClientLogger: Optional[EngineLog.Logger] = None
+
+
+def get_client_logger() -> EngineLog.Logger:
+   return _m_eClientLogger
+
+
+_m_eIncludeSystems: list[tuple[callable, callable]] = []
+_m_eSysNames: list[str] = []
+
+
+def _render_nothing():
+   pass
+
+
+def add_system(name: str, callback_update: callable, callback_render=_render_nothing):
+   _m_eIncludeSystems.append((callback_update, callback_render))
+   _m_eSysNames.append(name)
+
+
+def remove_system(name):
+   index = _m_eSysNames.index(name)
+   _m_eSysNames.remove(name)
+   del _m_eIncludeSystems[index]
+
 
 """ ------------------ ENGINE PRIVATE FUNCTIONS -----------------"""
 
 
-def _raise_engine_error(message: str) -> None:
+def _raise_engine_error(message: str, isfatal=True) -> None:
    """
    Raises an engine error correctly depending on wether the engine is built in debug or release mode
    :param message: error log to print
    :return: None
    """
+   _m_eEngineLogger.error(message)
+   # IF engine is in debug mode then print exception
    if get_engine_debugmode():
       raise Exception(message)
-   else:
+   elif isfatal:
+      # else create a Windows error box and exit application
       ctypes.windll.user32.MessageBoxW(0, f"An engine error has occured: {message}", "Error!", 16)
       _set_running(False)
 
@@ -325,7 +357,7 @@ def _check_safe() -> None:
    _raise_engine_error("Attempting to change engine variable while the engine is still running")
 
 
-def _engine_combine_rect(rect1: Optional[pygame.Rect], rect2: pygame.Rect) -> pygame.Rect:
+def _engine_combine_rect(rect1: Optional[pygame.Rect], rect2: Optional[pygame.Rect]) -> pygame.Rect:
    """
    Unionizes two pygame rectangles
    :param rect1: first rectangle (if none rect2 is returned)
@@ -334,29 +366,46 @@ def _engine_combine_rect(rect1: Optional[pygame.Rect], rect2: pygame.Rect) -> py
    """
    if not rect1:
       return rect2
+   if not rect2:
+      return rect1
    mLeft = min(rect1.left, rect2.left)
    mTop = min(rect1.top, rect2.top)
    return pygame.Rect(mLeft, mTop, max(rect1.right, rect2.right) - mLeft, max(rect1.bottom, rect2.bottom) - mTop)
 
 
 def _engine_quit():
+   _m_eEngineLogger.info("Exiting from the engine")
    _set_running(False)
 
 
 def _engine_step():
-   pass
+   _m_eCurrentScene.step_scene()
 
 
 def _engine_draw():
    global _m_eCurrentScene, _m_rQueue, _m_rPrevRect
    _m_eCurrentScene.draw_scene()
-
+   Console.render_console(100, 100)
    currentRect: Optional[pygame.Rect] = None
    while _m_rQueue:
-      cObject = _m_rQueue.pop()
-      if currentRect:
-         pygame.display.update(_engine_combine_rect(currentRect, _m_rPrevRect))
-         _m_rPrevRect = currentRect
+      cObject: RenderObject = _m_rQueue.pop(0)
+      try:
+         newRect = _ENGINE_DRAW_FUNCTIONS[cObject.rType](cObject)
+         if _m_eIsDebug:
+            gx.rectangle(_m_rWindow, newRect, C_GREEN)
+         if cObject.shouldAffect:
+            currentRect = _engine_combine_rect(currentRect, newRect)
+      except KeyError:
+         _raise_engine_error(f"Invalid render type: {cObject.rType}")
+   drawRect = None
+   if currentRect:
+      drawRect = _engine_combine_rect(currentRect, _m_rPrevRect)
+   elif _m_rPrevRect:
+      drawRect = _m_rPrevRect
+   if drawRect:
+      pygame.display.update(drawRect)
+      # print(f"Updated {drawRect}")
+   _m_rPrevRect = currentRect
 
 
 def _engine_gather_input():
@@ -378,6 +427,90 @@ def _engine_gather_input():
 def _create_window():
    global _m_rWindow
    _m_rWindow = pygame.display.set_mode(_m_rResolution)
+
+
+def _engine_draw_rect(obj: RenderObject) -> pygame.Rect:
+   """
+   Performs drawing operations for all rect-like render objects
+   :param obj: RenderObject to draw
+   :return: The bounding rectangle of the object
+   """
+   rect = pygame.Rect(obj.x, obj.y, obj.w, obj.h)
+   if obj.col:
+      gx.box(_m_rWindow, rect, obj.col)
+   if obj.oWidth and obj.oCol:
+      gx.rectangle(_m_rWindow, rect, obj.oCol)
+   return rect
+
+
+def _engine_draw_ellipse(obj: RenderObject) -> pygame.Rect:
+   """
+   Performs drawing operations for all rect-like render objects
+   :param obj: RenderObject to draw
+   :return: The bounding rectangle of the object
+   """
+   rect = pygame.Rect(obj.x - obj.w - obj.oWidth, obj.y - obj.h - obj.oWidth,
+                      (obj.w + obj.oWidth) * 2, (obj.h + obj.oWidth) * 2)
+   gx.filled_ellipse(_m_rWindow, int(obj.x), int(obj.y), obj.w, obj.h, obj.col)
+   tCol = obj.oCol if obj.oCol != C_BLACK else obj.col
+   gx.aaellipse(_m_rWindow, int(obj.x), int(obj.y), obj.w, obj.h, tCol)
+   return rect
+
+
+def _engine_draw_default_texture(x: int, y: int) -> pygame.Rect:
+   """
+   Draws the default engine texture
+   :param x: x position to draw to
+   :param y: y position to draw to
+   :return: the rect of the drawn texture
+   """
+   gx.box(_m_rWindow, (x, y, 50, 50), C_BLACK)
+   gx.box(_m_rWindow, (x, y, 25, 25), (255, 16, 240))
+   gx.box(_m_rWindow, (x + 25, y + 25, 25, 25), (255, 16, 240))
+   return pygame.Rect(x, y, 50, 50)
+
+
+def _engine_draw_texture(obj: RenderObject) -> pygame.Rect:
+   """
+   Performs all the drawing operations for textures
+   :param obj: texture RenderObject
+   :return: rectangle of the texture rendered
+   """
+   if obj.path not in _m_rTextureBank:
+      return _engine_draw_default_texture(int(obj.x), int(obj.y))
+   drawTexture = _m_rTextureBank[obj.path]
+   cacheString = f"{obj.path}w{obj.w}h{obj.h}"
+   if (obj.w or obj.h) and cacheString in _m_rTextureBank:
+      drawTexture = _m_rTextureBank[cacheString]
+   elif obj.w or obj.h:
+      drawTexture = pygame.transform.scale(_m_rTextureBank[obj.path], (obj.w, obj.h))
+   _m_rWindow.blit(drawTexture, (obj.x, obj.y))
+   return drawTexture.get_rect()
+
+
+def _cleanup_textures():
+   for texture in _m_rToCleanup:
+      del _m_rTextureBank[texture]
+
+
+def _add_render_object(obj: RenderObject):
+   global _m_rQueue
+   _m_rQueue.append(obj)
+
+
+_ENGINE_DRAW_FUNCTIONS = {
+   "rect": _engine_draw_rect,
+   "ellipse": _engine_draw_ellipse,
+   "texture": _engine_draw_texture
+}
+
+
+def _engine_key_handle(event: pygame.event.Event):
+   print("Handling")
+   if event.type == pygame.KEYUP:
+      if event.key == pygame.K_BACKQUOTE:
+         print("setting console shown")
+         Console.set_shown(True)
 
 
 """ ---------- EXPOSED ENGINE FUNCTIONS --------------"""
@@ -409,9 +542,133 @@ def time_to_ticks(_time: float) -> int:
    return math.floor(_time * (_m_eTickrate / 1e3))
 
 
+def refresh_window(refresh: [tuple, str] = C_BLACK):
+   global _m_rLastRefresh
+   is_col = isinstance(refresh, tuple)
+   render_type = "rect" if is_col else "texture"
+   render_colour = refresh if is_col else None
+   render_path = refresh if not is_col else None
+   _add_render_object(RenderObject(0, 0, _m_rResolution[0], _m_rResolution[1], render_type,
+                                   col=render_colour, path=render_path, shouldAffect=_m_rLastRefresh != refresh))
+   _m_rLastRefresh = refresh
+
+
+def draw_rect(x: float, y: float, w: int, h: int, colour: tuple = C_BLACK, outlineWidth: int = 1) -> None:
+   """
+   Draws an outline of a rectangle
+   :param x: x coordinate of the top left corner
+   :param y: y coordinate of the top left corner
+   :param w: width of the rectangle
+   :param h: height of the rectangle
+   :param colour: colour of the outline (default black)
+   :param outlineWidth: width of the rectangle outline (default 1)
+   :return: None
+   """
+   _add_render_object(RenderObject(x, y, w, h, "rect", oCol=colour, oWidth=outlineWidth))
+
+
+def fill_rect(x: float, y: float, w: int, h: int, colour: tuple,
+              outlineWidth: int = 0, outlineColour: tuple = C_BLACK) -> None:
+   """
+   Draws a filled rectangle
+   :param x: x coordinate of the top left corner
+   :param y: y coordinate of the top left corner
+   :param w: width of the rectangle
+   :param h: height of the rectangle
+   :param colour: colour of the fill
+   :param outlineWidth: width of the outline (optional)
+   :param outlineColour: colour of the outline (optional, default black)
+   :return: None
+   """
+   _add_render_object(RenderObject(x, y, w, h, "rect", col=colour, oCol=outlineColour, oWidth=outlineWidth))
+
+
+def draw_square(x: float, y: float, length: int, colour: tuple = C_BLACK, outlineWidth: int = 1) -> None:
+   """
+   Draws an outline of a square
+   :param x: x coordinate of the top-left corner
+   :param y: y coordinate of the top-left corner
+   :param length: length of the sides of the square
+   :param colour: colour of the outline (default black)
+   :param outlineWidth: outline width of the square (default 1)
+   :return:
+   """
+   draw_rect(x, y, length, length, colour, outlineWidth)
+
+
+def fill_square(x: float, y: float, length: int, colour: tuple,
+                outlineWidth: int = 0, outlineColour: tuple = C_BLACK) -> None:
+   """
+   Draws a filled square
+   :param x: x coordinate of top-left corner
+   :param y: y coordinate of top-left corner
+   :param length: length of the sides of the square
+   :param colour: fill colour
+   :param outlineWidth: outline width (optional)
+   :param outlineColour: outline colour (default black)
+   :return: None
+   """
+   fill_rect(x, y, length, length, colour, outlineWidth, outlineColour)
+
+
+def draw_ellipse(x: float, y: float, rX: int, rY: int, colour: tuple, outlineWidth: int = 1) -> None:
+   _add_render_object(RenderObject(x, y, rX, rY, "ellipse", oCol=colour, oWidth=outlineWidth))
+
+
+def fill_ellipse(x: float, y: float, rX: int, rY: int, colour: tuple,
+                 outlineWidth: int = 1, outlineColour: tuple = C_BLACK) -> None:
+   _add_render_object(RenderObject(x, y, rX, rY, "ellipse", col=colour, oWidth=outlineWidth, oCol=outlineColour))
+
+
+def draw_circle(x: float, y: float, r: int, colour: tuple, outlineWidth: int = 1) -> None:
+   draw_ellipse(x, y, r, r, colour, outlineWidth)
+
+
+def fill_circle(x: float, y: float, r: int, colour: tuple,
+                outlineWidth: int = 1, outlineColour: tuple = C_BLACK) -> None:
+   fill_ellipse(x, y, r, r, colour, outlineWidth, outlineColour)
+
+
+def draw_texture(x: float, y: float, textureID: str, width: int = None, height: int = None,
+                 shouldCache: bool = True) -> None:
+   _add_render_object(RenderObject(x, y, width, height, "texture", path=textureID, shouldCache=shouldCache))
+
+
+def load_texture(path: str, texID: str, newwidth: int = 0, newheight: int = 0, isstatic=False) -> False:
+   """
+   Loads a texture at the given path
+   :param path: Path to the image
+   :param texID: ID used to reference the texture
+   :param newwidth: new width of the image (must be used in conjunctuion with newheight
+   :param newheight: new height of the image (must be used in conjunction with newidth)
+   :param isstatic: An image is static if it will never change position / size
+   :return: None
+   """
+   if not os.path.isfile(path):
+      _m_eEngineLogger.warning(f"Could not find texture ID {texID} at {path}")
+      return
+   if texID in _m_rTextureBank:
+      _m_eEngineLogger.warning(f"Texture ID {texID} is being overwritten with the image at {path}")
+   _m_rTextureBank[texID] = pygame.image.load(path).convert()
+
+
+def mark_texture_for_cleanup(texID: str) -> None:
+   if texID not in _m_rTextureBank:
+      _m_eEngineLogger.warning(f"Attempting to mark {texID} for cleanup when it does not exist!")
+      return
+   global _m_rToCleanup
+   _m_rToCleanup.append(texID)
+
+
 def init():
    if not pygame.get_init():
       pygame.init()
+   global _m_eClientLogger, _m_eEngineLogger
+   logfile = f"logs/{EngineLog.Logger.get_date_time()}.log"
+   _m_eClientLogger = EngineLog.Logger(logfile, "CLIENT")
+   _m_eEngineLogger = EngineLog.Logger(logfile, "ENGINE")
+   _m_eEngineLogger.info("Initialised engine!")
+   add_key_callback(_engine_key_handle)
    _create_window()
    _set_init(True)
 
@@ -422,13 +679,16 @@ def run(initialScene: Scene.Scene) -> None:
    :param initialScene: the initial scene that the engine should run
    :return: None
    """
+   _m_eEngineLogger.info("Engine has been run")
    if not get_init():
       _raise_engine_error("Attempting to run engine when it is uninitialised. See documentation for more.")
+   Console.init()
    _set_running(True)
    set_scene(initialScene)
    pTime = 0
    lag = 0
    frames = 0
+   phys_steps = 0
    ticks = 0
    global _m_eTimePerTick, _m_eFPS, _m_eTPS
    while get_running():
@@ -443,6 +703,10 @@ def run(initialScene: Scene.Scene) -> None:
          if get_client_tickbase() % get_engine_tickrate() == 0:
             _m_eFPS = frames
             _m_eTPS = ticks
+            print(f"Frames: {_m_eFPS}")
+            print(f"Ticks: {_m_eTPS}")
+            print(f"Physics steps: {phys_steps}")
+            phys_steps = 0
             frames = 0
             ticks = 0
          lag -= _m_eTimePerTick
