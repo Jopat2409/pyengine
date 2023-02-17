@@ -33,11 +33,10 @@ class vec2d:
       return self
 
    def __rmul__(self, other: float) -> vec2d:
-      return vec2d(self.x*other, self.y*other)
+      return vec2d(self.x * other, self.y * other)
 
    def __truediv__(self, other: float) -> vec2d:
       return vec2d(self.x / other, self.y / other)
-
 
    def __itruediv__(self, other: vec2d) -> vec2d:
       self.x /= other

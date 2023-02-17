@@ -1,13 +1,14 @@
-import PyEngine
 import pygame
 
 
 class Scene:
 
    def __init__(self):
-      self.engine = PyEngine.Engine()
-      self.engine.add_key_listener(self.on_key_event)
-      self.engine.add_mouse_listener(self.on_mouse_event)
+      import Engine
+      self.engine = Engine
+      self.engine.get_client_logger().info("Created new scene!")
+      self.engine.add_key_callback(self.on_key_event)
+      self.engine.add_mouse_callback(self.on_mouse_event)
 
    def draw_scene(self):
       """
@@ -30,5 +31,5 @@ class Scene:
       pass
 
    def __del__(self):
-      self.engine.remove_key_listener(self.on_key_event)
-      self.engine.remove_mouse_listener(self.on_mouse_event)
+      self.engine.remove_key_callback(self.on_key_event)
+      self.engine.remove_mouse_callback(self.on_mouse_event)
